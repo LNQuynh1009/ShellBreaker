@@ -24,3 +24,5 @@ output/detections.jsonl
 
 # Java compiled classes
 *.class
+.claude/
+CLAUDE.md
