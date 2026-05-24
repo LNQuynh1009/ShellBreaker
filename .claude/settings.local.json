@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64)",
+      "Bash(mvn package *)",
+      "Bash(export JAVA_HOME=/usr/lib/jvm/java-11-amazon-corretto)",
+      "Bash(mvn compile *)",
+      "Read(//home/quynh/memshell-lab/**)",
+      "Bash(DOCKER_HOST=unix:///var/run/docker.sock docker compose stop splunk)",
+      "Bash(DOCKER_HOST=unix:///var/run/docker.sock docker compose rm -f splunk)",
+      "Bash(DOCKER_HOST=unix:///var/run/docker.sock docker volume rm memshell-lab_splunk-data)",
+      "Bash(DOCKER_HOST=unix:///var/run/docker.sock docker compose up -d splunk)"
+    ]
+  }
+}

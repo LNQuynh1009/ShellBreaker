@@ -1,0 +1,26 @@
+# Virtualenv
+.venv/
+
+# Large dataset (re-generate with scripts/01_collect_dataset.sh + 02/02b/03)
+dataset/
+
+# Generated PNG images (re-generate with scripts/03_build_grayscale.py)
+output/benign/
+output/webshell_file/
+output/webshell_fileless/
+
+# Superseded ResNet50 model (92 MB)
+model_best.pt
+training_report.json
+
+# Archives
+output.zip
+
+# Compiler temp files
+javac.*.args
+
+# Runtime detection log (may contain scan results)
+output/detections.jsonl
+
+# Java compiled classes
+*.class

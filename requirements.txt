@@ -1,0 +1,13 @@
+torch
+torchvision
+pillow
+scikit-learn
+tqdm
+fastapi
+uvicorn
+python-multipart
+requests
+matplotlib
+xgboost
+scipy
+joblib
