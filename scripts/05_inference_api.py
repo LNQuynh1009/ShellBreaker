@@ -137,44 +137,132 @@ def extract_features(class_path: Path, vocab: dict[str, int]) -> np.ndarray | No
     return np.concatenate([unigram, bigram, meta]), javap_text
 
 # ---------------------------------------------------------------------------
-# Rule-based layer (c0ny1-derived)
+# Rule-based layer (c0ny1-inspired: expanded interface coverage + scoring)
 # ---------------------------------------------------------------------------
-_WEBSHELL_INTERFACES = {
-    "javax/servlet/Filter","javax/servlet/Servlet","javax/servlet/http/HttpServlet",
-    "javax/servlet/ServletRequestListener","javax/servlet/http/HttpSessionListener",
+
+# Servlet/Filter/Listener — direct HTTP request handling (score: 3 each)
+_IFACES_SERVLET = {
+    "javax/servlet/Filter", "javax/servlet/Servlet", "javax/servlet/http/HttpServlet",
+    "javax/servlet/ServletRequestListener", "javax/servlet/http/HttpSessionListener",
     "javax/servlet/ServletContextListener",
-    "jakarta/servlet/Filter","jakarta/servlet/Servlet","jakarta/servlet/http/HttpServlet",
+    "jakarta/servlet/Filter", "jakarta/servlet/Servlet", "jakarta/servlet/http/HttpServlet",
+    "jakarta/servlet/ServletContextListener", "jakarta/servlet/http/HttpSessionListener",
 }
-_SUSPICIOUS_KEYWORDS = [
-    "shell","cmd","exec","backdoor","payload","webshell",
-    "memshell","agent","inject","exploit","hack","evil",
-    "godzilla","behinder","regeorg",
-]
-_DANGER_PATTERNS = [
-    re.compile(r"java/lang/Runtime.*exec|ProcessBuilder", re.IGNORECASE),
-    re.compile(r"defineClass",                            re.IGNORECASE),
-    re.compile(r"java/net/URLClassLoader",                re.IGNORECASE),
+
+# Tomcat pipeline injection — Valve and Executor (score: 3 each)
+_IFACES_TOMCAT = {
+    "org/apache/catalina/Valve",
+    "org/apache/catalina/valves/ValveBase",
+    "org/apache/catalina/Executor",
+}
+
+# Spring/framework interceptor injection (score: 3 each)
+_IFACES_SPRING = {
+    "org/springframework/web/servlet/HandlerInterceptor",
+    "org/springframework/web/socket/WebSocketHandler",
+}
+
+# WebSocket endpoint injection (score: 2 each)
+_IFACES_WEBSOCKET = {
+    "javax/websocket/Endpoint",
+    "javax/websocket/server/ServerEndpointConfig$Configurator",
+}
+
+# Java Agent — ClassFileTransformer used for agentmain injection (score: 3)
+_IFACES_AGENT = {
+    "java/lang/instrument/ClassFileTransformer",
+}
+
+# Dangerous API calls: (regex, label, score)
+_DANGER_APIS: list[tuple] = [
+    (re.compile(r"java/lang/Runtime",              re.I), "runtime_exec",    3),
+    (re.compile(r"ProcessBuilder",                 re.I), "processbuilder",  3),
+    (re.compile(r"defineClass",                    re.I), "defineClass",     3),
+    (re.compile(r"java/net/URLClassLoader",        re.I), "url_classloader", 2),
+    (re.compile(r"sun/misc/Unsafe",                re.I), "unsafe_api",      2),
+    (re.compile(r"javax/script/ScriptEngine",      re.I), "script_engine",   2),
+    (re.compile(r"groovy/lang/GroovyClassLoader",  re.I), "groovy_cl",       2),
+    (re.compile(r"java/lang/instrument/Instrumentation", re.I), "agent_api", 2),
+    (re.compile(r"setContextClassLoader",          re.I), "cl_hijack",       2),
+    (re.compile(r"setAccessible",                  re.I), "reflection_bypass", 1),
 ]
 
+# Known webshell tool strings in constant pool (score: 4)
+_TOOL_RE = re.compile(
+    r"godzilla|behinder|icescorpion|regeorg|antsword|rebeyond|"
+    r"memshell|x-cmd|xpassword|java-memshell",
+    re.IGNORECASE,
+)
+
+# Suspicious class name keywords (score: 2 each)
+_SUSPICIOUS_KEYWORDS = [
+    "shell", "cmd", "exec", "backdoor", "payload", "webshell",
+    "memshell", "inject", "exploit", "hack", "evil",
+    "godzilla", "behinder", "regeorg", "icescorpion",
+]
+
+
 def rule_check(class_path: Path, javap_text: str) -> dict:
-    rules = []
-    for iface in _WEBSHELL_INTERFACES:
+    rules: list[str] = []
+    score = 0
+
+    # 1. Injection interface matching
+    for iface in _IFACES_SERVLET:
         if iface in javap_text:
-            rules.append(f"implements {iface.split('/')[-1]}")
+            rules.append(f"iface:{iface.split('/')[-1]}")
+            score += 3
+    for iface in _IFACES_TOMCAT:
+        if iface in javap_text:
+            rules.append(f"iface:{iface.split('/')[-1]}")
+            score += 3
+    for iface in _IFACES_SPRING:
+        if iface in javap_text:
+            rules.append(f"iface:{iface.split('/')[-1]}")
+            score += 3
+    for iface in _IFACES_WEBSOCKET:
+        if iface in javap_text:
+            rules.append(f"iface:{iface.split('/')[-1]}")
+            score += 2
+    for iface in _IFACES_AGENT:
+        if iface in javap_text:
+            rules.append(f"iface:{iface.split('/')[-1]}")
+            score += 3
+
+    # 2. Dangerous API patterns
+    for pat, label, pts in _DANGER_APIS:
+        if pat.search(javap_text):
+            rules.append(f"api:{label}")
+            score += pts
+
+    # 3. Known tool fingerprints in constant pool
+    m = _TOOL_RE.search(javap_text)
+    if m:
+        rules.append(f"tool:{m.group()[:20]}")
+        score += 4
+
+    # 4. Suspicious class name
     stem = class_path.stem.lower()
     for kw in _SUSPICIOUS_KEYWORDS:
         if kw in stem:
             rules.append(f"name:{kw}")
-    for pat in _DANGER_PATTERNS:
-        if pat.search(javap_text):
-            rules.append(f"danger:{pat.pattern[:35]}")
+            score += 2
+            break  # one match is enough
+
+    # 5. Obfuscated class name (1-3 chars, not inner class)
+    if len(class_path.stem) <= 3 and "$" not in class_path.stem:
+        rules.append("name:obfuscated_short")
+        score += 1
+
+    # 6. Missing SourceFile — injected/generated classes often lack debug info
     if "SourceFile:" not in javap_text and "$" not in class_path.stem:
-        rules.append("no SourceFile")
+        rules.append("no_source_attr")
+        score += 1
+
     if not rules:
-        return {"triggered": False, "rules": [], "risk": "LOW"}
-    risk = "HIGH" if (any("implements" in r for r in rules) and
-                      any("danger" in r for r in rules)) else "MEDIUM"
-    return {"triggered": True, "rules": rules, "risk": risk}
+        return {"triggered": False, "rules": [], "risk": "LOW", "score": 0}
+
+    risk = "HIGH" if score >= 6 else "MEDIUM"
+    return {"triggered": True, "rules": rules, "risk": risk, "score": score}
 
 # ---------------------------------------------------------------------------
 # Combined verdict
