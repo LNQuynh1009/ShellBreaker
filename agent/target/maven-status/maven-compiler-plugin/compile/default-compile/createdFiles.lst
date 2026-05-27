@@ -1,0 +1,12 @@
+com/shellbreaker/agent/ShellBreakerAgent.class
+com/shellbreaker/output/Reporter$1.class
+com/shellbreaker/rules/BytecodeVisitor$1.class
+com/shellbreaker/output/Reporter.class
+com/shellbreaker/rules/RuleEngine.class
+com/shellbreaker/rules/ScanResult$Risk.class
+com/shellbreaker/rules/ScanResult.class
+com/shellbreaker/agent/ClassScanner.class
+com/shellbreaker/output/ClassExtractor.class
+com/shellbreaker/attach/AttachMain.class
+com/shellbreaker/agent/AgentConfig.class
+com/shellbreaker/rules/BytecodeVisitor.class

@@ -47,9 +47,9 @@ VOCAB_JSON        = ROOT / "output" / "vocab.json"
 
 WORKERS = min(8, (os.cpu_count() or 4))
 
-TARGET_FILE     = 613   # all available file-based webshells (cap; fewer after size filter)
-TARGET_FILELESS = 87    # all available fileless webshells
-TARGET_BENIGN   = 2500  # ~4x webshell_file — more diversity to reduce false positives
+TARGET_FILE     = 9999  # take all available (signal-filtered in 02b)
+TARGET_FILELESS = 9999  # take all available
+# TARGET_BENIGN is computed dynamically in main() as 8× file-based count, capped at available
 
 # Files smaller than this are almost always interfaces, annotations, empty stubs, or
 # trivial POJOs scraped from exploit-framework repos — not actual webshells.

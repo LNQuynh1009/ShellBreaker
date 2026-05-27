@@ -162,10 +162,13 @@ _IFACES_SPRING = {
     "org/springframework/web/socket/WebSocketHandler",
 }
 
-# WebSocket endpoint injection (score: 2 each)
+# WebSocket / Netty endpoint injection (score: 2 each)
 _IFACES_WEBSOCKET = {
     "javax/websocket/Endpoint",
     "javax/websocket/server/ServerEndpointConfig$Configurator",
+    "org/springframework/web/socket/WebSocketHandler",
+    "io/netty/channel/ChannelHandler",
+    "io/netty/channel/ChannelInboundHandler",
 }
 
 # Java Agent — ClassFileTransformer used for agentmain injection (score: 3)
@@ -174,17 +177,23 @@ _IFACES_AGENT = {
 }
 
 # Dangerous API calls: (regex, label, score)
+# Phase 3: added Proxy, in-memory compile, BCEL, Javassist, RMI (copagent-derived)
 _DANGER_APIS: list[tuple] = [
-    (re.compile(r"java/lang/Runtime",              re.I), "runtime_exec",    3),
-    (re.compile(r"ProcessBuilder",                 re.I), "processbuilder",  3),
-    (re.compile(r"defineClass",                    re.I), "defineClass",     3),
-    (re.compile(r"java/net/URLClassLoader",        re.I), "url_classloader", 2),
-    (re.compile(r"sun/misc/Unsafe",                re.I), "unsafe_api",      2),
-    (re.compile(r"javax/script/ScriptEngine",      re.I), "script_engine",   2),
-    (re.compile(r"groovy/lang/GroovyClassLoader",  re.I), "groovy_cl",       2),
-    (re.compile(r"java/lang/instrument/Instrumentation", re.I), "agent_api", 2),
-    (re.compile(r"setContextClassLoader",          re.I), "cl_hijack",       2),
-    (re.compile(r"setAccessible",                  re.I), "reflection_bypass", 1),
+    (re.compile(r"java/lang/Runtime",               re.I), "runtime_exec",      3),
+    (re.compile(r"ProcessBuilder",                  re.I), "processbuilder",    3),
+    (re.compile(r"defineClass",                     re.I), "defineClass",       3),
+    (re.compile(r"java/net/URLClassLoader",         re.I), "url_classloader",   2),
+    (re.compile(r"sun/misc/Unsafe",                 re.I), "unsafe_api",        2),
+    (re.compile(r"javax/script/ScriptEngine",       re.I), "script_engine",     2),
+    (re.compile(r"groovy/lang/GroovyClassLoader",   re.I), "groovy_cl",         2),
+    (re.compile(r"java/lang/instrument/Instrumentation", re.I), "agent_api",    2),
+    (re.compile(r"setContextClassLoader",           re.I), "cl_hijack",         2),
+    (re.compile(r"setAccessible",                   re.I), "reflection_bypass", 1),
+    (re.compile(r"java/lang/reflect/Proxy",         re.I), "reflect_proxy",     2),
+    (re.compile(r"javax/tools/JavaCompiler",        re.I), "in_memory_compile", 3),
+    (re.compile(r"javassist/ClassPool|javassist/CtClass", re.I), "javassist",   2),
+    (re.compile(r"org/apache/bcel",                 re.I), "bcel_codegen",      2),
+    (re.compile(r"java/rmi/server/UnicastRemoteObject", re.I), "rmi_backdoor",  2),
 ]
 
 # Known webshell tool strings in constant pool (score: 4)
