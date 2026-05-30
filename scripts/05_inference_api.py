@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-05_inference_api.py — Hybrid Java webshell detector: XGBoost + rule-based.
+05_inference_api.py — Hybrid Java webshell detector: ML + rule-based.
 
-ML layer: XGBoost on opcode unigram + bigram + metadata features.
+ML layer: ResNet50 (model_best.pt) or XGBoost (xgb_model.pkl), auto-detected
+  by file extension.  ResNet50 takes priority if model_best.pt is present.
 Rule layer (c0ny1-derived): servlet/filter/listener interfaces, exec/reflect
   patterns, suspicious class names, missing SourceFile attribute.
 
@@ -24,24 +25,32 @@ import tempfile
 import time
 from pathlib import Path
 
-import joblib
 import numpy as np
-from scipy.sparse import csr_matrix
 
 # ---------------------------------------------------------------------------
-# Paths
+# Paths — ResNet50 (model_best.pt) takes priority over XGBoost (xgb_model.pkl)
 # ---------------------------------------------------------------------------
-ROOT        = Path(__file__).parent.parent
-MODEL_PATH  = ROOT / "output" / "xgb_model.pkl"
-REPORT_PATH = ROOT / "output" / "xgb_report.json"
-VOCAB_JSON  = ROOT / "output" / "vocab.json"
-LOG_PATH    = ROOT / "output" / "detections.jsonl"
+ROOT       = Path(__file__).parent.parent
+VOCAB_JSON = ROOT / "output" / "vocab.json"
+LOG_PATH   = ROOT / "output" / "detections.jsonl"
+
+_RESNET_PATH = ROOT / "output" / "model_best.pt"
+_XGB_PATH    = ROOT / "output" / "xgb_model.pkl"
+
+# Pick model automatically: ResNet50 if model_best.pt exists, else XGBoost
+MODEL_PATH = _RESNET_PATH if _RESNET_PATH.exists() else _XGB_PATH
 
 HIGH_THRESHOLD = 0.85
 
+
+def _report_path() -> Path:
+    return ROOT / "output" / "training_report.json" if MODEL_PATH == _RESNET_PATH \
+        else ROOT / "output" / "xgb_report.json"
+
+
 def load_inference_threshold() -> float:
     try:
-        return float(json.loads(REPORT_PATH.read_text()).get("inference_threshold", 0.50))
+        return float(json.loads(_report_path().read_text()).get("inference_threshold", 0.50))
     except Exception:
         return 0.50
 
@@ -69,7 +78,7 @@ INVOKE_OPS  = {"invokevirtual","invokespecial","invokestatic","invokeinterface",
 REFLECT_OPS = {"invokevirtual","invokedynamic"}
 
 # ---------------------------------------------------------------------------
-# Feature extraction (identical to 04b_train_xgboost.py)
+# Feature extraction — shared disassembly step used by both model backends
 # ---------------------------------------------------------------------------
 
 def disassemble(class_path: Path) -> tuple[list[str] | None, str]:
@@ -90,11 +99,29 @@ def disassemble(class_path: Path) -> tuple[list[str] | None, str]:
         return None, ""
 
 
-def extract_features(class_path: Path, vocab: dict[str, int]) -> np.ndarray | None:
-    ops, javap_text = disassemble(class_path)
-    if ops is None or len(ops) < 4:
-        return None, javap_text
+def build_adjacency_image(ops: list[str], vocab: dict[str, int]):
+    """Build 149×149 opcode adjacency matrix and return as PIL grayscale Image.
+    Used by the ResNet50 backend (matches 03_build_grayscale.py exactly).
+    """
+    from PIL import Image as PILImage
+    n = len(vocab)
+    mat = np.zeros((n, n), dtype=np.uint32)
+    for i in range(len(ops) - 1):
+        a = vocab.get(ops[i], -1)
+        b = vocab.get(ops[i + 1], -1)
+        if a >= 0 and b >= 0:
+            mat[a, b] += 1
+    max_val = mat.max()
+    if max_val > 0:
+        mat = (mat.astype(float) / max_val * 255).astype(np.uint8)
+    else:
+        mat = mat.astype(np.uint8)
+    return PILImage.fromarray(mat)
 
+
+def extract_xgb_features(ops: list[str], javap_text: str,
+                          class_path: Path, vocab: dict[str, int]) -> np.ndarray:
+    """Flat unigram + bigram + metadata feature vector for XGBoost."""
     n     = len(vocab)
     total = len(ops)
 
@@ -114,9 +141,9 @@ def extract_features(class_path: Path, vocab: dict[str, int]) -> np.ndarray | No
     bigram /= max(total - 1, 1)
 
     SERVLET_IFACES = {
-        "javax/servlet/Filter","javax/servlet/Servlet","javax/servlet/http/HttpServlet",
-        "javax/servlet/ServletRequestListener","javax/servlet/http/HttpSessionListener",
-        "jakarta/servlet/Filter","jakarta/servlet/Servlet","jakarta/servlet/http/HttpServlet",
+        "javax/servlet/Filter", "javax/servlet/Servlet", "javax/servlet/http/HttpServlet",
+        "javax/servlet/ServletRequestListener", "javax/servlet/http/HttpSessionListener",
+        "jakarta/servlet/Filter", "jakarta/servlet/Servlet", "jakarta/servlet/http/HttpServlet",
     }
     invoke_cnt  = sum(1 for op in ops if op in INVOKE_OPS)
     reflect_cnt = sum(1 for op in ops if op in REFLECT_OPS)
@@ -134,7 +161,7 @@ def extract_features(class_path: Path, vocab: dict[str, int]) -> np.ndarray | No
         athrow_cnt  / total,
     ], dtype=np.float32)
 
-    return np.concatenate([unigram, bigram, meta]), javap_text
+    return np.concatenate([unigram, bigram, meta])
 
 # ---------------------------------------------------------------------------
 # Rule-based layer (c0ny1-inspired: expanded interface coverage + scoring)
@@ -282,32 +309,84 @@ def combined_verdict(ml_score: float, rule: dict, inf_threshold: float) -> tuple
     rule_medium = rule["triggered"] and rule["risk"] == "MEDIUM"
     ml_high     = ml_score >= HIGH_THRESHOLD
     ml_medium   = ml_score >= inf_threshold
-    if rule_high and ml_medium:
+    # Rule HIGH alone → CONFIRMED (no ML gate): rule engine is precise for fileless
+    # webshells (0 FP on benign_test) and compensates for ML's low recall on fileless.
+    if rule_high:
         return "WEBSHELL", "CONFIRMED"
     if ml_high:
         return "WEBSHELL", "HIGH"
-    if ml_medium or rule_high or rule_medium:
+    if ml_medium or rule_medium:
         return "WEBSHELL", "MEDIUM"
     return "BENIGN", "BENIGN"
 
 # ---------------------------------------------------------------------------
-# Predictor
+# Predictor — auto-detects ResNet50 vs XGBoost from MODEL_PATH extension
 # ---------------------------------------------------------------------------
 
 class Predictor:
     def __init__(self):
-        print(f"Loading XGBoost model from {MODEL_PATH}")
-        self.model         = joblib.load(MODEL_PATH)
         self.vocab         = json.loads(VOCAB_JSON.read_text())
         self.inf_threshold = load_inference_threshold()
+
+        if MODEL_PATH.suffix == ".pt":
+            self._init_resnet50()
+        else:
+            self._init_xgboost()
+
         print(f"  Inference threshold : {self.inf_threshold:.4f}")
         print(f"  HIGH threshold      : {HIGH_THRESHOLD:.2f}")
 
-    def predict(self, class_path: Path) -> dict:
-        result = extract_features(class_path, self.vocab)
-        feats, javap_text = result if isinstance(result, tuple) else (result, "")
+    def _init_resnet50(self):
+        import torch
+        import torch.nn as nn
+        import torchvision.models as models
+        import torchvision.transforms as transforms
 
-        if feats is None:
+        print(f"Loading ResNet50 model from {MODEL_PATH}")
+        self.backend = "resnet50"
+        self.device  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        model = models.resnet50()
+        model.fc = nn.Linear(model.fc.in_features, 1)
+        state = torch.load(MODEL_PATH, map_location=self.device, weights_only=True)
+        model.load_state_dict(state)
+        model.eval()
+        self.model = model.to(self.device)
+
+        self.transform = transforms.Compose([
+            transforms.Grayscale(num_output_channels=3),
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                 std=[0.229, 0.224, 0.225]),
+        ])
+        print(f"  Backend : ResNet50  |  Device: {self.device}")
+
+    def _init_xgboost(self):
+        import joblib
+        from scipy.sparse import csr_matrix as _csr
+        self._csr = _csr
+
+        print(f"Loading XGBoost model from {MODEL_PATH}")
+        self.backend = "xgboost"
+        self.model   = joblib.load(MODEL_PATH)
+        print(f"  Backend : XGBoost")
+
+    def _ml_score(self, class_path: Path, ops: list[str], javap_text: str) -> float:
+        if self.backend == "resnet50":
+            import torch
+            img    = build_adjacency_image(ops, self.vocab)
+            tensor = self.transform(img).unsqueeze(0).to(self.device)
+            with torch.no_grad():
+                return float(torch.sigmoid(self.model(tensor)).item())
+        else:
+            feats = extract_xgb_features(ops, javap_text, class_path, self.vocab)
+            return float(self.model.predict_proba(self._csr(feats.reshape(1, -1)))[0, 1])
+
+    def predict(self, class_path: Path) -> dict:
+        ops, javap_text = disassemble(class_path)
+
+        if ops is None or len(ops) < 4:
             return {
                 "verdict": "ERROR", "tier": "ERROR",
                 "ml_score": None,
@@ -315,9 +394,8 @@ class Predictor:
                 "reason": "javap failed or too few opcodes",
             }
 
-        X       = csr_matrix(feats.reshape(1, -1))
-        ml_score = float(self.model.predict_proba(X)[0, 1])
-        rule     = rule_check(class_path, javap_text)
+        ml_score      = self._ml_score(class_path, ops, javap_text)
+        rule          = rule_check(class_path, javap_text)
         verdict, tier = combined_verdict(ml_score, rule, self.inf_threshold)
 
         return {
@@ -325,7 +403,7 @@ class Predictor:
             "tier":     tier,
             "ml_score": round(ml_score, 4),
             "rule":     rule,
-            "opcodes":  None,
+            "backend":  self.backend,
         }
 
 # ---------------------------------------------------------------------------
@@ -366,8 +444,8 @@ def run_server():
         print("Missing deps: pip install fastapi uvicorn python-multipart"); sys.exit(1)
 
     predictor = Predictor()
-    app = FastAPI(title="ShellBreaker", version="2.1",
-                  description="Hybrid Java memory webshell detector (XGBoost + rules).")
+    app = FastAPI(title="ShellBreaker", version="2.2",
+                  description="Hybrid Java memory webshell detector (ResNet50/XGBoost + rules).")
 
     @app.post("/predict")
     async def predict(file: UploadFile = File(...)):

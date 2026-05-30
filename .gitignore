@@ -8,13 +8,16 @@ dataset/
 output/benign/
 output/webshell_file/
 output/webshell_fileless/
+output/benign_test/
 
-# Superseded ResNet50 model (92 MB)
+# ML model weights (92 MB — download from Colab results)
+output/model_best.pt
 model_best.pt
-training_report.json
 
 # Archives
 output.zip
+result.zip
+ysrc.zip
 
 # Compiler temp files
 javac.*.args

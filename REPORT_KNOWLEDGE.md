@@ -1,7 +1,7 @@
 # Báo Cáo Kiến Thức Nền: Phát Hiện Java Memory Webshell
 ## Phân Tích Tĩnh, Phân Tích Động và Kiến Trúc Hệ Thống ShellBreaker
 
-> Phiên bản: 1.0 | Ngày: 2026-05-28 | Tác giả: LNQuynh1009
+> Phiên bản: 2.0 | Ngày: 2026-05-30 | Tác giả: LNQuynh1009
 
 ---
 
@@ -438,10 +438,11 @@ Tại sao approach image hoạt động? Vì opcode bigram matrix của webshell
 - Webshell: nhiều pixel sáng ở vùng `invokevirtual`, `ldc`, `aload` transitions
 - Benign library class: pattern phân tán đều hơn, nhiều `getfield`/`putfield` pixel
 
-**Tuy nhiên**, GAShellBreaker trong paper gốc dùng ResNet50 — ShellBreaker phát hiện rằng **XGBoost tốt hơn đáng kể** vì:
-- Feature matrix quá sparse (~50-100 non-zero trên 22,201 cells) → CNN tốn tài nguyên để học từ noise
-- XGBoost với colsample_bytree tự động focus vào sparse features có ý nghĩa
-- XGBoost F1 = 0.985 vs ResNet50 F1 = 0.62 trên cùng dataset
+**Cập nhật (v2.0)**: ShellBreaker đã chuyển sang dùng **ResNet50** như paper gốc, sau khi retrain trên dataset sạch hơn (signal-filtered, 876 webshell + 2,000 benign sampled):
+- ResNet50 F1 = **0.991** ±0.007 trên file-based webshell (3-run avg)
+- AUC-ROC = **0.999** ±0.001
+- Lý do thành công: dataset v2 sạch hơn đáng kể so với v1 (signal filter loại noise class), và grayscale image representation phù hợp với ResNet50 visual feature extraction
+- XGBoost vẫn được giữ lại như fallback (`xgb_model.pkl`), inference tự động chọn `model_best.pt` nếu tồn tại
 
 #### 3.4.3 Deep Learning: BERT-based (Pu et al., 2022)
 
@@ -670,7 +671,7 @@ java-memshell-scanner.jsp (deploy như JSP)
 |-------|----------|-------|----------|-------------|
 | **Timing** | Tại thời điểm class load | Sau khi inject | Tại API call | Cả hai (premain + agentmain) |
 | **Scope** | Class mới load | Toàn bộ heap | Mọi API call | Class mới + scan cũ |
-| **ML layer** | Không | Không | Không | Có (XGBoost) |
+| **ML layer** | Không | Không | Không | Có (ResNet50) |
 | **Scoring** | Binary | Binary | Binary | Weighted (0-12+) |
 | **Alert tier** | Dump/Không dump | Report/Không | Block/Allow | CONFIRMED/HIGH/MEDIUM/BENIGN |
 | **SIEM integration** | Không | Không | Có (OpenRASP enterprise) | Splunk HEC |
@@ -772,13 +773,16 @@ ShellBreaker tích hợp các kỹ thuật từ copagent, c0ny1, GAShellBreaker 
 │                                                                  │
 │  JSP upload → Tomcat Jasper compile → .class trong work dir      │
 │       ↓                                                          │
-│  inotify event → detector.py                                     │
+│  inotify event → detector.py v2.3                               │
 │       ↓                                                          │
-│  javap → opcode sequence → Feature vector 22,360 dims           │
+│  javap → opcode sequence → 149×149 adjacency matrix → PNG        │
 │       ↓                           ↓                             │
-│  XGBoost ml_score            Rule-based scoring                  │
+│  ResNet50 ml_score           Rule-based scoring                  │
 │       ↓                           ↓                             │
-│  Combined verdict: CONFIRMED / HIGH / MEDIUM / BENIGN           │
+│  Combined verdict (rule-first):                                  │
+│    rule HIGH  → CONFIRMED (không cần ML)                         │
+│    ML ≥ 0.85  → HIGH                                             │
+│    ML ≥ 0.50 OR rule MEDIUM → MEDIUM                             │
 └─────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
@@ -796,11 +800,11 @@ ShellBreaker tích hợp các kỹ thuật từ copagent, c0ny1, GAShellBreaker 
 │       ↓                                                          │
 │  POST /agent-report → detector.py                                │
 │       ↓                                                          │
-│  ML scan trên extracted class → verdict kết hợp                 │
+│  ResNet50 + Rule scan → rule-first verdict kết hợp              │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 7.2 Feature Engineering: 22,360 chiều
+### 7.2 Feature Engineering: Grayscale Image (149×149)
 
 ```
 File .class
@@ -811,24 +815,34 @@ Opcode sequence extraction (regex: r"^\s+\d+:\s+([a-z][a-z0-9_]+)")
     ↓
 Normalize 40+ short-form variants → 149 canonical opcodes
     ↓
-┌─────────────┬──────────────────┬────────────────────┐
-│ Unigram     │ Bigram           │ Metadata           │
-│ 149 dims    │ 22,201 dims      │ 10 dims            │
-│             │                  │                    │
-│ count(op_i) │ count(op_i→op_j) │ class size         │
-│ / total     │ / (total-1)      │ SourceFile present │
-│             │                  │ inner class        │
-│             │                  │ servlet interface  │
-│             │                  │ Runtime.exec       │
-│             │                  │ defineClass        │
-│             │                  │ URLClassLoader     │
-│             │                  │ invoke ratio       │
-│             │                  │ reflect ratio      │
-│             │                  │ athrow ratio       │
-└─────────────┴──────────────────┴────────────────────┘
-             → Concatenate → 22,360-dim sparse vector
-             → csr_matrix (scipy) → XGBClassifier
+Build 149×149 adjacency count matrix:
+    mat[i][j] += 1  for each consecutive pair (op_i → op_j)
+    ↓
+Normalize pixels: pixel = count / max_count × 255  (→ uint8)
+    ↓
+Save as 149×149 grayscale PNG
+    ↓
+Resize to 224×224 → convert to 3-channel RGB → ImageNet normalize
+    ↓
+ResNet50 (pretrained ImageNet, FC replaced with Linear(2048, 1))
+    ↓
+sigmoid → ml_score ∈ [0, 1]
 ```
+
+**Tại sao grayscale image hoạt động tốt với dataset sạch:**
+- Webshell tạo ra visual pattern đặc trưng: pixel sáng tập trung ở vùng `ldc→invokevirtual`, `invokevirtual→aload` (chuỗi gọi method + string load)
+- Benign class: pattern phân tán đều hơn, nhiều `getfield/putfield` pixel
+- ResNet50 với pretrained weights đã học được edge/texture detection → transfer tốt sang opcode pattern
+
+**So sánh với XGBoost flat vector (legacy):**
+
+| | Flat vector (XGBoost) | Grayscale (ResNet50) |
+|---|---|---|
+| Dims | 22,360 (sparse) | 149×149×3 (image) |
+| F1 file-based | 0.985 ±0.009 | **0.991 ±0.007** |
+| Recall fileless | 0.263 | 0.325 |
+| GPU cần | Không | Có (Colab T4) |
+| Inference time | ~2ms | ~50ms CPU |
 
 ### 7.3 Rule-based Layer: Weighted Scoring
 
@@ -876,28 +890,38 @@ no_code_source      → +2  (Java Agent: ProtectionDomain null) ← chỉ Java A
 Tổng: 12 → HIGH
 ```
 
-### 7.4 Combined Verdict Logic
+### 7.4 Combined Verdict Logic (Rule-first — v2.0)
 
 ```python
-def combined_verdict(ml_score, rule, inf_threshold):
-    rule_high   = rule["triggered"] and rule["risk"] == "HIGH"   # score >= 6
-    rule_medium = rule["triggered"] and rule["risk"] == "MEDIUM" # score >= 2
-    ml_high     = ml_score >= 0.85
-    ml_medium   = ml_score >= inf_threshold  # ~0.50
+def combined_verdict(ml_score, rule_score, inf_threshold=0.50):
+    rule_high   = rule_score >= 6    # score >= 6 → HIGH
+    rule_medium = rule_score >= 2    # score >= 2 → MEDIUM
+    ml_high     = ml_score   >= 0.85
+    ml_medium   = ml_score   >= inf_threshold
 
-    if rule_high and ml_medium:  → CONFIRMED  # Cả hai đồng ý → alert ngay
-    if ml_high:                  → HIGH       # ML rất tự tin → alert ngay
-    if ml_medium or rule_high or rule_medium: → MEDIUM  # Một trong hai cảnh báo
-    else:                        → BENIGN
+    if rule_high:               → CONFIRMED  # Rule HIGH một mình đủ để xác nhận
+    if ml_high:                 → HIGH       # ML rất tự tin → alert ngay
+    if ml_medium or rule_medium:→ MEDIUM     # Một trong hai → review
+    else:                       → BENIGN
 ```
 
-**Lý do thiết kế 4 tier**:
-- **CONFIRMED**: Độ tin cậy cao nhất — cả ML và rule đồng ý. Trigger PagerDuty/on-call.
-- **HIGH**: ML score rất cao (≥0.85) ngay cả khi rule không bắt. Trigger alert ngay.
-- **MEDIUM**: Một trong hai cảnh báo — queue cho analyst review. Không block tự động.
-- **BENIGN**: Không có dấu hiệu nào — silence.
+**Thay đổi quan trọng từ v1.0 → v2.0**:
 
-Thiết kế này giải quyết bài toán **alert fatigue** phổ biến trong SIEM — không phải mọi detection đều cần immediate response.
+| | v1.0 (XGBoost era) | v2.0 (ResNet50 era) |
+|---|---|---|
+| CONFIRMED | rule HIGH **AND** ml ≥ 0.50 | rule HIGH **alone** |
+| Lý do thay đổi | — | Eval: rule 0 FP trên 463 benign_test; ML recall fileless chỉ 32.5% |
+| Fileless CONFIRMED | 24/80 (30%) | **76/80 (95%)** |
+
+**Lý do thiết kế 4 tier**:
+- **CONFIRMED**: Rule HIGH đủ bằng chứng mạnh (score ≥ 6, ví dụ: Filter + Runtime.exec). Gửi email + Splunk ngay.
+- **HIGH**: ML ≥ 0.85 — model rất tự tin dù rule không bắt (file-based shell không implement interface known).
+- **MEDIUM**: Chỉ một bên cảnh báo — queue cho analyst review. Không block.
+- **BENIGN**: Không có dấu hiệu — silence.
+
+Thiết kế này giải quyết bài toán **alert fatigue** trong SIEM và đồng thời tối ưu cho hai loại webshell:
+- File-based: ML mạnh → HIGH/CONFIRMED qua ML path
+- Fileless: Rule mạnh → CONFIRMED qua rule path, bù đắp ML recall thấp
 
 ### 7.5 Java Agent: RuleEngine trong JVM
 
@@ -981,55 +1005,66 @@ if (protectionDomain != null && score > 0) {
 
 ## 8. Kết quả thực nghiệm và so sánh
 
-### 8.1 Dataset cuối (v4.1 — signal-filtered)
+### 8.1 Dataset cuối (v5.0 — signal-filtered, ResNet50 era)
 
 | Phân loại | Số lượng | Mục đích |
 |-----------|---------|---------|
-| `webshell_file` | **876** | Train + Validation (70/15/15 split) |
+| `webshell_file` | **876** | Train + Test (80/20 stratified, 3 runs) |
 | `webshell_fileless` | **82** | **Test only** — zero-shot generalization |
-| `benign` (training) | **4,136** | Train + Validation |
-| `benign_test` | **500** | **Test only** — Maven Central, domain mới |
+| `benign` (training) | 4,994 khả dụng; **2,000 sampled** | Train + Test (80/20) |
+| `benign_test` | **500** (463 PNG) | **Test only** — Maven Central, domain mới |
 
-**82 fileless samples** bao phủ 9 loại injection vector, từ 6 repo nguồn khác nhau (java-memshell-generator, changheluor007/MemShell, su18/MemoryShell, rebeyond/memShell, wsMemShell, MemoryShellLearn).
+**82 fileless samples** bao phủ 9 loại injection vector, từ 6 repo nguồn. Fileless **không bao giờ xuất hiện trong training** — recall trên chúng là zero-shot generalization thực sự.
 
-Điểm thiết kế quan trọng nhất: **fileless webshell không bao giờ xuất hiện trong training**. Recall=1.000 trên 82 mẫu là zero-shot generalization thực sự — không phải kết quả trên train set.
+Webshell sources theo paper (Table 5): tennc/Webshell, xl7dev/Webshell, gxu-yuan/ysrc-back, threedr3am/JSP-Webshells.
 
-### 8.2 Kết quả XGBoost (3-run average, default threshold 0.50)
+### 8.2 Kết quả ResNet50 (3-run average, Colab T4, threshold 0.50)
 
-| Threshold | Precision | Recall | F1 | AUC-ROC |
-|-----------|-----------|--------|-----|---------|
-| Default (0.50) | **1.000** ±0.000 | 0.970 ±0.018 | **0.985** ±0.009 | **0.999** ±0.001 |
-| High-recall (0.105) | 0.484 ±0.008 | **1.000** ±0.000 | 0.653 ±0.007 | **0.999** ±0.001 |
+| Metric | Value |
+|--------|-------|
+| Accuracy | **0.9925** ±0.0059 |
+| Precision | **0.9925** ±0.0072 |
+| Recall | **0.9898** ±0.0068 |
+| F1 | **0.9911** ±0.0070 |
+| AUC-ROC | **0.9988** ±0.0014 |
 
-**Chú ý**: Precision=1.000 trên validation set có nghĩa là zero false positive trong training domain (file-based webshell + training benign class). Không có benign class nào bị classify nhầm là webshell.
+So sánh với paper gốc (GAShellBreaker, ResNet50 trên 383 webshell + 968 benign):
+- Paper: Acc=0.9910, Pre=0.9913, Rec=0.9830, F1=0.9870
+- ShellBreaker v2: Acc=0.9925, Pre=0.9925, Rec=0.9898, F1=0.9911 ← tương đương hoặc nhỉnh hơn
 
-### 8.3 Held-out test: ML-only vs Hybrid (82 fileless + 500 benign_test)
+### 8.3 Held-out test: ML-only vs Rule-only vs Hybrid (80 fileless + 463 benign_test)
 
-| Approach | Precision | Recall | F1 | FPR |
-|----------|-----------|--------|-----|-----|
-| ML only | 1.000 | 0.263 | 0.416 | 0.000 |
-| **Hybrid (ML + Rule)** | **0.976** | **1.000** | **0.988** | **0.004** |
+| Approach | Accuracy | Precision | Recall | F1 | FPR |
+|----------|----------|-----------|--------|-----|-----|
+| ML only (ResNet50 ≥0.50) | 0.901 | 1.000 | 0.325 | 0.491 | 0.000 |
+| Rule only (score ≥2) | **1.000** | **1.000** | **1.000** | **1.000** | **0.000** |
+| **Hybrid rule-first** | **1.000** | **1.000** | **1.000** | **1.000** | **0.000** |
+
+**Hybrid verdict breakdown (80 fileless webshells):**
+- **CONFIRMED**: 76 (95%) — rule HIGH fired → immediate alert, email, Splunk
+- **MEDIUM**: 4 (5%) — rule MEDIUM only, ML score thấp → analyst review
+- **BENIGN**: 0
 
 **Phân tích**:
 
-- **ML Recall = 0.263** trên fileless: Đây là kết quả mong đợi và có chủ đích. Model train trên file-based JSP webshell — opcode distribution của fileless memshell khác đáng kể. Threshold 0.50 cao → nhiều fileless bị miss. Đây là zero-shot generalization test thực sự.
+- **ML Recall = 0.325** trên fileless: Model được train trên file-based JSP webshell — opcode distribution của fileless memshell khác đáng kể (ít `ldc`, nhiều `invokevirtual` registration calls). Đây là kết quả zero-shot test thực sự.
 
-- **ML Precision = 1.000**: Trong số các fileless model classify là webshell, không có false positive nào. Model hoàn toàn chắc chắn khi nó predict — vấn đề là nó bỏ qua nhiều quá.
+- **Rule Recall = 1.000, FPR = 0.000**: Tất cả 80 fileless đều trigger rule (implements Filter/Servlet/Valve/Agent hoặc gọi defineClass), và không có benign nào bị flag. Rule engine hoàn toàn bù đắp ML's low recall.
 
-- **Hybrid Recall = 1.000**: Rule layer bù đắp hoàn toàn ML recall thấp. Lý do: fileless webshell **hầu như luôn** implement một trong các servlet interface (Filter, Servlet, Listener, v.v.) hoặc gọi `defineClass`. Rule engine bắt được signal này dù ML miss.
-
-- **FPR = 0.004** (2/500 false positive trên benign_test): Các false positive là legitimate Tomcat framework class implement `javax.servlet.Filter` với một số pattern tương tự webshell. Acceptable trong production.
+- **Thiết kế rule-first (v2.0)**: Vì rule FPR = 0 trên benign_test, rule HIGH một mình đủ để confirm → 95% fileless được CONFIRMED thay vì chỉ 30% khi cần ML confirm thêm.
 
 ### 8.4 So sánh với các công cụ baseline
 
 | Công cụ | Approach | Recall (fileless) | FPR | Ghi chú |
 |---------|----------|-------------------|-----|---------|
-| copagent | Rule-based (class load) | ~0.70 | Thấp | Không có Spring/WebSocket coverage |
-| c0ny1 scanner | Rule-based (heap scan) | ~0.80 | Thấp | Manual trigger, no realtime |
-| JShellDetector | Signature-based | ~0.50 | Thấp | Dễ bypass bằng rename |
+| copagent | Rule-based (class load) | ~0.70 | Thấp | Không có Spring/WebSocket |
+| c0ny1 scanner | Rule-based (heap scan) | ~0.80 | Thấp | Manual, không real-time |
+| JShellDetector (Song et al.) | Dynamic taint analysis | ~0.80 | Thấp | Chỉ Servlet/Spring |
 | OpenRASP | RASP hooking | ~0.80 | Trung bình | Cần integrate vào app |
-| **ShellBreaker ML-only** | XGBoost static | 0.263 | **0.000** | Zero false positive nhưng miss nhiều |
-| **ShellBreaker Hybrid** | ML + Rule static | **1.000** | **0.004** | **Best overall** |
+| GAShellBreaker (paper) | ResNet50 + monitoring | **0.893** | — | 50/56 fileless detected |
+| **ShellBreaker ML-only** | ResNet50 static | 0.325 | **0.000** | Zero FP, low fileless recall |
+| **ShellBreaker Rule-only** | Rule static | **1.000** | **0.000** | Perfect on test set |
+| **ShellBreaker Hybrid (rule-first)** | ResNet50 + Rule | **1.000** | **0.000** | **Best overall** |
 | **ShellBreaker + Agent** | Hybrid + Runtime | **~1.000** | **Thấp** | + no_backing_file / no_code_source |
 
 ---

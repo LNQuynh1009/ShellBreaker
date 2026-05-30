@@ -85,13 +85,16 @@ FILE_BASED_REPOS = {
     "web-malware-collection",  # classic JSP backdoors (cmd, upload, browse)
     "webshell-detect-bypass",  # obfuscation-bypass JSPs (ProcessBuilder, Runtime reflect)
     "JSPHorse",                # obfuscation-bypass webshells: BCEL, JavaCompiler, URLClassLoader
-    "JSP-WebShells",           # 26 JSPs (threedr3am)
+    "JSP-WebShells",           # 26 JSPs (threedr3am/JSP-Webshells — paper Table 5)
     "Webshell-Collections",    # 582 JSPs (fr4nk404 — Chopper/AntSword/CaiDao etc.)
     "webshellSample",          # 45 JSPs (tanjiti)
-    "WebShell",                # 55 JSPs (xl7dev — JspSpy, JspHelper, etc.)
+    "WebShell",                # 55 JSPs (xl7dev/Webshell — paper Table 5; JspSpy, JspHelper)
     "tutorial0-WebShell",      # 33 JSPs
     "oneoneplus-webshell",     # 17 JSPs
     "webshell",                # pureqh generator — compiled JSP variants in generated_jsps/
+    # gxu-yuan/ysrc-back (paper Table 5) — raw JSPs compiled separately via 02d script.
+    # Run scripts/02d_compile_ysrc_jsps.sh (needs lab Tomcat running) first; compiled
+    # .class files land directly in webshell_file/ and are picked up automatically here.
 }
 
 # Release JARs from known security research tools (file-based category).

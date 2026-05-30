@@ -39,9 +39,11 @@ ROOT              = Path(__file__).parent.parent
 COMPILED_FILE     = ROOT / "dataset" / "compiled" / "webshell_file"
 COMPILED_FILELESS = ROOT / "dataset" / "compiled" / "webshell_fileless"
 COMPILED_BN       = ROOT / "dataset" / "compiled" / "benign"
+COMPILED_BN_TEST  = ROOT / "dataset" / "compiled" / "benign_test"
 OUT_FILE          = ROOT / "output" / "webshell_file"
 OUT_FILELESS      = ROOT / "output" / "webshell_fileless"
 OUT_BN            = ROOT / "output" / "benign"
+OUT_BN_TEST       = ROOT / "output" / "benign_test"
 DATASET_CSV       = ROOT / "output" / "dataset.csv"
 VOCAB_JSON        = ROOT / "output" / "vocab.json"
 
@@ -269,6 +271,11 @@ def process_split(
 def main():
     random.seed(RANDOM_SEED)
 
+    # Compute benign target dynamically before any prints that reference it
+    n_file_avail   = len(list(COMPILED_FILE.glob("*.class"))) if COMPILED_FILE.exists() else 0
+    n_benign_avail = len(list(COMPILED_BN.glob("*.class")))   if COMPILED_BN.exists()   else 0
+    TARGET_BENIGN  = min(2000, n_benign_avail)
+
     print("=== Step 03: Build Grayscale PNGs (three-category) ===")
     print(f"  Vocab: {len(JVM_VOCAB_149)} opcodes → {len(JVM_VOCAB_149)}×{len(JVM_VOCAB_149)} matrix")
     print(f"  Targets: {TARGET_FILE} file-based, {TARGET_FILELESS} fileless, {TARGET_BENIGN} benign")
@@ -301,6 +308,14 @@ def main():
     fileless_rows = process_split(COMPILED_FILELESS, OUT_FILELESS, 1, "webshell_fileless", vocab, n)
     bn_rows       = process_split(COMPILED_BN,       OUT_BN,       0, "benign",            vocab, n)
 
+    # benign_test — held-out negatives for the fileless generalisation eval (never in training CSV)
+    bn_test_rows = []
+    if COMPILED_BN_TEST.exists() and any(COMPILED_BN_TEST.glob("*.class")):
+        bn_test_rows = process_split(COMPILED_BN_TEST, OUT_BN_TEST, 0, "benign_test", vocab, n)
+        print(f"\n  benign_test PNGs generated: {len(bn_test_rows)}  (held-out, not in dataset.csv)")
+    else:
+        print(f"\n  [info] No benign_test .class files — skipping benign_test PNGs")
+
     # Sample to exact targets
     if len(file_rows) > TARGET_FILE:
         print(f"\n  Sampling file-based: {len(file_rows)} → {TARGET_FILE}")
@@ -314,6 +329,8 @@ def main():
         print(f"  Sampling benign: {len(bn_rows)} → {TARGET_BENIGN}")
         bn_rows = random.sample(bn_rows, TARGET_BENIGN)
 
+    # dataset.csv covers train/val splits only (webshell_file + benign)
+    # fileless and benign_test are held-out — referenced by path in training script directly
     all_rows = file_rows + fileless_rows + bn_rows
     with open(DATASET_CSV, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=["path", "label", "type", "class"])
@@ -321,10 +338,11 @@ def main():
         writer.writerows(all_rows)
 
     print(f"\n=== Done ===")
-    print(f"  webshell_file    in CSV: {len(file_rows)}")
-    print(f"  webshell_fileless in CSV: {len(fileless_rows)}")
-    print(f"  benign           in CSV: {len(bn_rows)}")
-    print(f"  Total in CSV:            {len(all_rows)}")
+    print(f"  webshell_file     in CSV : {len(file_rows)}")
+    print(f"  webshell_fileless in CSV : {len(fileless_rows)}")
+    print(f"  benign            in CSV : {len(bn_rows)}")
+    print(f"  benign_test (held-out)   : {len(bn_test_rows)}  (PNGs only — not in CSV)")
+    print(f"  Total in CSV             : {len(all_rows)}")
     print(f"  dataset.csv → {DATASET_CSV}")
     print(f"  vocab.json  → {VOCAB_JSON}  (matrix {n}×{n})")
 
@@ -333,7 +351,7 @@ def main():
     if len(fileless_rows) < TARGET_FILELESS:
         print(f"\n  [warn] Only {len(fileless_rows)} fileless samples; target is {TARGET_FILELESS}")
 
-    print("\nNext step: open notebooks/colab_train.ipynb in Google Colab (GPU training)")
+    print("\nNext step: python3 scripts/04_train_resnet50.py  (GPU recommended — use Colab)")
 
 
 if __name__ == "__main__":
